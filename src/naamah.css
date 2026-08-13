@@ -1,0 +1,601 @@
+/* naamah — diagram runtime. Dark-first, light-aware, zero external assets. */
+
+:root {
+  --bg: #0a0c12;
+  --bg-glow: #131a2b;
+  --surface: #141924;
+  --surface-2: #1a2030;
+  --surface-3: #212938;
+  --line: #262e40;
+  --line-soft: #1e2534;
+  --ink: #e6ebf5;
+  --ink-2: #a3aec4;
+  --ink-3: #6b7689;
+  --wire: #6b7a9e;
+  --wire-hot: #8ba3ff;
+  --shadow: 0 2px 10px -3px rgba(0,0,0,.6);
+  --shadow-lift: 0 2px 6px rgba(0,0,0,.5), 0 24px 48px -12px rgba(0,0,0,.8);
+
+  --k-interface: #b39dff;
+  --k-class: #58b2ff;
+  --k-abstract: #2fd4c0;
+  --k-enum: #f7b955;
+  --k-struct: #ff8098;
+  --k-note: #ffd479;
+
+  --pub: #3fb950;
+  --priv: #f0666f;
+  --prot: #d29922;
+
+  --radius: 13px;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --ui: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+}
+
+[data-theme="light"] {
+  --bg: #f4f6fb;
+  --bg-glow: #e9eefa;
+  --surface: #ffffff;
+  --surface-2: #f6f8fc;
+  --surface-3: #eef2f9;
+  --line: #ccd6e4;
+  --line-soft: #e0e7f1;
+  --ink: #10151f;
+  --ink-2: #4b5768;
+  --ink-3: #77869a;
+  --wire: #7386a3;
+  --wire-hot: #3b6cf0;
+  --shadow: 0 2px 8px -3px rgba(16,24,40,.16);
+  --shadow-lift: 0 2px 6px rgba(16,24,40,.09), 0 24px 44px -14px rgba(16,24,40,.32);
+
+  --k-interface: #7c3aed;
+  --k-class: #0b74d8;
+  --k-abstract: #0d9488;
+  --k-enum: #b45309;
+  --k-struct: #d43a63;
+  --k-note: #a16207;
+  --pub: #15803d;
+  --priv: #dc2626;
+  --prot: #b45309;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; height: 100%; overflow: hidden;
+  background: var(--bg); color: var(--ink);
+  font-family: var(--ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ─────────────────────────────  stage  ───────────────────────────── */
+
+#stage {
+  position: fixed; inset: 0;
+  cursor: grab;
+  overscroll-behavior: none;
+  touch-action: none;
+  background:
+    radial-gradient(ellipse 90% 60% at 50% -10%, var(--bg-glow), transparent 70%),
+    var(--bg);
+}
+#stage.panning { cursor: grabbing; }
+/* The grid is gone. It measured as the most expensive single element in the frame
+   (-29% pan when removed) and earned none of it — the stage gradient alone reads as
+   depth. Nothing here repaints while the camera moves. */
+
+#world { position: absolute; top: 0; left: 0; transform-origin: 0 0; will-change: transform; }
+#world.animate { transition: transform .42s cubic-bezier(.22,.61,.36,1); }
+
+#wires { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
+
+/* ─────────────────────────────  groups  ──────────────────────────── */
+
+.group {
+  position: absolute;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  transition: border-color .15s;
+}
+.group.depth-1 { border-style: dashed; }
+.group.depth-2 { border-color: var(--line-soft); }
+
+.group-tab {
+  position: absolute; top: -13px; left: 18px;
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 4px 11px 4px 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font: 600 11px/1 var(--ui);
+  letter-spacing: .04em; text-transform: uppercase;
+  color: var(--ink-2);
+  cursor: pointer; user-select: none; white-space: nowrap;
+  z-index: 3;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.group-tab:hover { color: var(--ink); border-color: var(--wire-hot); }
+.group-tab .caret {
+  width: 13px; height: 13px; flex: none;
+  transition: transform .25s cubic-bezier(.22,.61,.36,1);
+}
+.tab-btn {
+  width: 19px; height: 19px; flex: none; margin: -3px -5px -3px 1px;
+  border: 0; border-radius: 5px; padding: 0;
+  background: transparent; color: var(--ink-3);
+  display: grid; place-items: center; cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.tab-btn:hover { background: var(--surface-3); color: var(--ink); }
+.tab-btn.on { background: color-mix(in oklab, var(--wire-hot) 22%, transparent); color: var(--wire-hot); }
+.tab-btn svg { width: 12px; height: 12px; }
+
+/* Deliberately still shown on a collapsed puck: it doubles as "open this group and show
+   me everything in it", which is the one-click version of caret-then-expand. */
+.group.collapsed { background: var(--surface-2); border-style: solid; }
+.group.collapsed > .group-tab .caret { transform: rotate(-90deg); }
+.group-count {
+  padding: 1px 6px; border-radius: 999px;
+  background: var(--surface-3); color: var(--ink-3);
+  font-size: 10px; font-variant-numeric: tabular-nums;
+}
+
+/* ─────────────────────────────  cards  ───────────────────────────── */
+
+.card {
+  position: absolute;
+  /* Above every group frame. Frames are positioned with a z-index by nesting depth, so
+     without this the innermost frame covers its own cards and swallows their clicks. */
+  z-index: 10;
+  width: var(--w, 260px);
+  min-width: 190px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  overflow: hidden;
+  cursor: grab;
+  /* No transition on left/top: those are layout properties, so animating them made all
+     33 cards re-layout every frame for 400ms after each expand. Position snaps now. */
+  transition: border-color .15s, opacity .15s;
+}
+.card::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: var(--accent);
+}
+.card:hover { border-color: color-mix(in oklab, var(--accent) 55%, var(--line)); }
+.card.dragging { cursor: grabbing; z-index: 60; border-color: var(--accent); transition: none; }
+.card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.card.linked { border-color: color-mix(in oklab, var(--wire-hot) 60%, var(--line)); }
+.card.linked2 { border-color: color-mix(in oklab, var(--wire-hot) 26%, var(--line)); }
+.card.dimmed { opacity: .14; }
+.card.hit { border-color: var(--k-enum); box-shadow: 0 0 0 1px var(--k-enum); }
+
+.card[data-kind="interface"] { --accent: var(--k-interface); }
+.card[data-kind="class"]     { --accent: var(--k-class); }
+.card[data-kind="abstract"]  { --accent: var(--k-abstract); }
+.card[data-kind="enum"]      { --accent: var(--k-enum); }
+.card[data-kind="struct"]    { --accent: var(--k-struct); }
+.card[data-kind="note"]      { --accent: var(--k-note); }
+
+.card-head {
+  display: flex; align-items: center; gap: 9px;
+  padding: 10px 12px 10px 13px;
+}
+.badge {
+  flex: none;
+  width: 21px; height: 21px; border-radius: 6px;
+  display: grid; place-items: center;
+  background: color-mix(in oklab, var(--accent) 20%, transparent);
+  border: 1px solid color-mix(in oklab, var(--accent) 45%, transparent);
+  color: var(--accent);
+  font: 700 10px/1 var(--ui);
+}
+.card-title {
+  flex: 1; min-width: 0;
+  font: 600 13.5px/1.25 var(--mono);
+  color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  letter-spacing: -.01em;
+}
+.card[data-kind="interface"] .card-title,
+.card[data-kind="abstract"] .card-title { font-style: italic; }
+.card-title mark { background: color-mix(in oklab, var(--k-enum) 40%, transparent); color: inherit; border-radius: 2px; }
+
+.stereo {
+  flex: none; padding: 3px 6px; border-radius: 5px;
+  background: var(--surface-3); color: var(--ink-3);
+  font: 600 9.5px/1 var(--ui); letter-spacing: .04em; text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* Secondary next to the type name, and it was stealing the width that made long titles
+   ellipsize in the folded view. It appears once the card is open. */
+.card.lvl-0 .stereo { display: none; }
+
+.card-tools { display: flex; gap: 2px; flex: none; }
+.tool {
+  width: 22px; height: 22px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--ink-3);
+  display: grid; place-items: center; cursor: pointer; padding: 0;
+  transition: background .15s, color .15s;
+}
+.tool:hover { background: var(--surface-3); color: var(--ink); }
+.tool.danger:hover { background: color-mix(in oklab, var(--priv) 22%, transparent); color: var(--priv); }
+.tool svg { width: 13px; height: 13px; }
+.tool .caret { transition: transform .25s cubic-bezier(.22,.61,.36,1); }
+.card.lvl-0 .tool .caret { transform: rotate(-90deg); }
+
+.card-body {
+  border-top: 1px solid var(--line-soft);
+  padding: 5px 0 7px;
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows .28s cubic-bezier(.22,.61,.36,1),
+              opacity .2s, padding .28s, border-color .2s;
+}
+.card.lvl-0 .card-body {
+  grid-template-rows: 0fr; opacity: 0; padding-top: 0; padding-bottom: 0; border-color: transparent;
+}
+/* Width is deliberately the SAME at every detail level. A folded card used to shrink to
+   `max-content`, which packed the titles view tighter but meant expanding a card also made
+   it wider — so it shoved its row neighbours sideways and the whole diagram resettled.
+   Reserving the full width up front means expanding only ever grows downward, which is
+   something the layout can absorb without moving anything else. */
+.card-body > .rows { overflow: hidden; min-height: 0; }
+
+.row { padding: 3px 13px 3px 12px; }
+.row-main { display: flex; align-items: baseline; gap: 8px; }
+.dot {
+  flex: none; width: 6px; height: 6px; border-radius: 50%; margin-top: 5px;
+  border: 1.5px solid var(--ink-3); background: transparent;
+}
+.dot.pub { border-color: var(--pub); }
+.dot.priv { border-color: var(--priv); }
+.dot.prot { border-color: var(--prot); }
+.dot.method { border-radius: 1.5px; }
+.dot.filled { background: currentColor; }
+
+.sig {
+  font: 400 12.5px/1.5 var(--mono);
+  color: var(--ink-2);
+  word-break: break-word;
+}
+.row-event .sig { color: var(--k-enum); }
+.row-method .sig { color: var(--ink); }
+.sig mark { background: color-mix(in oklab, var(--k-enum) 40%, transparent); color: inherit; border-radius: 2px; }
+
+.explain {
+  display: grid; grid-template-rows: 1fr;
+  transition: grid-template-rows .28s cubic-bezier(.22,.61,.36,1), opacity .2s, margin .25s;
+  margin: 2px 0 4px 14px;
+}
+.explain > div { overflow: hidden; min-height: 0; }
+.card.lvl-1 .explain { grid-template-rows: 0fr; opacity: 0; margin-top: 0; margin-bottom: 0; }
+.explain p {
+  margin: 0;
+  padding: 2px 0 2px 11px;
+  border-left: 2px solid color-mix(in oklab, var(--accent) 40%, transparent);
+  font: italic 400 11.5px/1.55 var(--ui);
+  color: var(--ink-3);
+}
+
+.lede {
+  margin: 1px 12px 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  font: italic 400 11.5px/1.5 var(--ui);
+  color: var(--ink-3);
+}
+
+.card-note-tab {
+  display: flex; align-items: center; gap: 6px;
+  margin: 6px 12px 2px; padding: 5px 9px;
+  border-radius: 8px; border: 1px dashed color-mix(in oklab, var(--k-note) 45%, transparent);
+  background: color-mix(in oklab, var(--k-note) 8%, transparent);
+  color: var(--k-note);
+  font: 600 10.5px/1 var(--ui); letter-spacing: .04em; text-transform: uppercase;
+  cursor: pointer; user-select: none;
+}
+.card-note-tab:hover { background: color-mix(in oklab, var(--k-note) 16%, transparent); }
+.card-note-tab svg { width: 12px; height: 12px; flex: none; }
+.card-note-tab span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* note cards — the prose only unfurls at "Full", so level 1 stays scannable */
+.card.note { max-width: 420px; }
+.card.note.lvl-1 .card-body {
+  grid-template-rows: 0fr; opacity: 0; padding-top: 0; padding-bottom: 0; border-color: transparent;
+}
+.card.note.lvl-1 .tool .caret { transform: rotate(-90deg); }
+.card.note .card-head {
+  background: linear-gradient(180deg, color-mix(in oklab, var(--k-note) 14%, var(--surface)), var(--surface));
+}
+.card.note .card-title { font: 600 12.5px/1.35 var(--ui); white-space: normal; letter-spacing: 0; }
+.note-body { padding: 8px 14px 12px; }
+.note-body p { margin: 0 0 7px; font: 400 12px/1.6 var(--ui); color: var(--ink-2); }
+.note-body p:last-child { margin-bottom: 0; }
+.note-body p.rule { height: 1px; background: var(--line); margin: 9px 0; padding: 0; }
+.note-body strong { color: var(--ink); font-weight: 650; }
+.note-body code {
+  font: 400 11.5px/1.4 var(--mono);
+  background: var(--surface-3); padding: 1px 5px; border-radius: 4px; color: var(--k-note);
+}
+.card.note.hidden-note { display: none; }
+
+/* ─────────────────────────────  wires  ───────────────────────────── */
+
+/* non-scaling-stroke keeps the structure legible when you zoom all the way out —
+   otherwise a 1.6px wire is a third of a pixel at 20% and the graph reads as empty. */
+.wire { fill: none; stroke: var(--wire); stroke-width: 1.7; vector-effect: non-scaling-stroke;
+        transition: stroke .2s, opacity .2s, stroke-width .2s; }
+.wire.dependency { stroke-dasharray: 6 5; }
+.wire.realization { stroke-dasharray: 8 6; }
+.wire.association { stroke-dasharray: 3 4; opacity: .6; }
+.wire.hot { stroke: var(--wire-hot); stroke-width: 2.4; opacity: 1; }
+/* A selected card's relations. Bolder than hover, solid regardless of the relation's own dash, and
+   raised above the pale wires they cross — the point is to trace one type's connections at a
+   glance, which a dashed 1.7px line crossing forty others does not allow. */
+.wire.live {
+  stroke: var(--wire-hot); stroke-width: 3.2; opacity: 1;
+  stroke-dasharray: none;
+  filter: drop-shadow(0 0 5px color-mix(in oklab, var(--wire-hot) 55%, transparent));
+}
+.wire.faded { opacity: .07; }
+.wire-hit { fill: none; stroke: transparent; stroke-width: 16; pointer-events: stroke; cursor: pointer; }
+/* A closed head is a type relationship, an open head is usage; filled vs hollow then
+   separates "owns the lifetime" from "merely holds". Hollow heads are painted with the
+   page background, not left transparent, so a wire passing behind one cannot show
+   through it and read as a filled glyph. */
+.cap { fill: var(--wire); stroke: var(--wire); stroke-width: 1.6; stroke-linejoin: round;
+       vector-effect: non-scaling-stroke; transition: fill .2s, stroke .2s, opacity .2s; }
+.cap.hollow { fill: var(--bg); }
+.cap.open { fill: none; stroke-linecap: round; stroke-width: 1.8; }
+.cap.hot { fill: var(--wire-hot); stroke: var(--wire-hot); }
+.cap.hollow.hot { fill: var(--bg); stroke: var(--wire-hot); }
+.cap.open.hot { fill: none; stroke: var(--wire-hot); }
+/* Second ring: clearly lit, clearly subordinate. It keeps its own dash pattern, where the first
+   ring goes solid — so the two rings differ in weight AND in texture, not by opacity alone. */
+.wire.live2 {
+  stroke: color-mix(in oklab, var(--wire-hot) 62%, var(--wire));
+  stroke-width: 2.2; opacity: .95;
+}
+.cap.live2 {
+  fill: color-mix(in oklab, var(--wire-hot) 62%, var(--wire));
+  stroke: color-mix(in oklab, var(--wire-hot) 62%, var(--wire));
+  stroke-width: 1.8; opacity: .95;
+}
+.cap.hollow.live2 { fill: var(--bg); }
+.cap.open.live2 { fill: none; }
+
+.cap.live { fill: var(--wire-hot); stroke: var(--wire-hot); stroke-width: 2.2; opacity: 1; }
+.cap.hollow.live { fill: var(--bg); stroke: var(--wire-hot); }
+.cap.open.live { fill: none; stroke: var(--wire-hot); }
+.cap.faded { opacity: .07; }
+.tether { stroke: color-mix(in oklab, var(--k-note) 55%, transparent); stroke-width: 1.3; stroke-dasharray: 2 5;
+          fill: none; opacity: .75; vector-effect: non-scaling-stroke; }
+.tether.faded { opacity: .06; }
+/* A tether is the faintest thing on the page by design — 1.3px, dotted, half-transparent. When its
+   note or its host is selected it has the furthest to travel to become visible, so it gets the
+   biggest jump of anything here: solid, full accent, and thicker than a ring-1 relation. */
+.tether.live {
+  stroke: var(--wire-hot); stroke-width: 2.6; stroke-dasharray: none; opacity: 1;
+  filter: drop-shadow(0 0 5px color-mix(in oklab, var(--wire-hot) 55%, transparent));
+}
+.tether.live2 {
+  stroke: color-mix(in oklab, var(--wire-hot) 62%, var(--k-note));
+  stroke-width: 1.9; stroke-dasharray: 3 4; opacity: .95;
+}
+
+.wire-label {
+  font: 600 9.5px/1 var(--ui); fill: var(--ink-3);
+  text-transform: uppercase; letter-spacing: .06em;
+  paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round;
+  opacity: 0; transition: opacity .2s;
+}
+.wire-label.show { opacity: 1; }
+
+/* ─────────────────────────────  chrome  ──────────────────────────── */
+
+.hud { position: fixed; z-index: 100; }
+
+#topbar.focused { border-bottom-color: var(--wire-hot); }
+#topbar.focused .brand-mark { background: var(--wire-hot); box-shadow: none; }
+
+#topbar {
+  top: 0; left: 0; right: 0;
+  display: flex; align-items: center; gap: 14px;
+  padding: 11px 16px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line-soft);
+}
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.brand-mark {
+  width: 26px; height: 26px; border-radius: 8px; flex: none;
+  background: linear-gradient(135deg, var(--k-interface), var(--k-class));
+  display: grid; place-items: center;
+  color: #fff; font: 800 12px/1 var(--ui);
+  box-shadow: 0 3px 12px -3px var(--k-class);
+}
+.brand-text { min-width: 0; }
+.brand-title {
+  font: 650 13px/1.3 var(--ui); color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 52vw;
+}
+.brand-sub { font: 500 10.5px/1.3 var(--ui); color: var(--ink-3); letter-spacing: .03em; }
+
+.spacer { flex: 1; }
+
+.hud-field {
+  display: flex; align-items: center; gap: 7px;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: 9px; padding: 0 10px; height: 32px;
+  transition: border-color .15s;
+}
+.hud-field:focus-within { border-color: var(--wire-hot); }
+.hud-field svg { width: 13px; height: 13px; color: var(--ink-3); flex: none; }
+.hud-field input {
+  border: 0; background: transparent; outline: none; color: var(--ink);
+  font: 400 12.5px var(--ui); width: 170px;
+}
+.hud-field input::placeholder { color: var(--ink-3); }
+.hud-field kbd {
+  font: 500 10px/1 var(--ui); color: var(--ink-3);
+  border: 1px solid var(--line); border-radius: 4px; padding: 3px 5px; background: var(--surface-2);
+}
+.hitcount { font: 500 11px/1 var(--ui); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+
+.seg {
+  display: flex; background: var(--surface); border: 1px solid var(--line);
+  border-radius: 9px; padding: 3px; gap: 2px; height: 32px;
+}
+.seg button {
+  border: 0; background: transparent; color: var(--ink-3);
+  font: 550 11.5px/1 var(--ui); padding: 0 10px; border-radius: 6px; cursor: pointer;
+  display: flex; align-items: center; gap: 6px;
+  transition: background .15s, color .15s;
+}
+.seg button:hover { color: var(--ink); }
+.seg button.on { background: var(--surface-3); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.2); }
+.seg button svg { width: 13px; height: 13px; }
+
+.textbtn {
+  display: flex; align-items: center; gap: 7px;
+  height: 32px; padding: 0 13px 0 11px; flex: none;
+  border: 1px solid var(--line); border-radius: 9px;
+  background: var(--surface); color: var(--ink-2);
+  font: 550 12px/1 var(--ui); cursor: pointer; white-space: nowrap;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.textbtn:hover { color: var(--ink); border-color: var(--wire-hot); }
+.textbtn svg { width: 14px; height: 14px; flex: none; }
+
+.iconbtn {
+  width: 32px; height: 32px; flex: none;
+  border: 1px solid var(--line); border-radius: 9px;
+  background: var(--surface); color: var(--ink-2);
+  display: grid; place-items: center; cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.iconbtn:hover { color: var(--ink); border-color: var(--wire-hot); }
+.iconbtn.on { background: var(--surface-3); color: var(--ink); }
+.iconbtn svg { width: 15px; height: 15px; }
+
+/* zoom cluster */
+#zoombar {
+  right: 16px; bottom: 16px;
+  display: flex; flex-direction: column; gap: 6px; align-items: stretch;
+}
+#zoombar .textbtn {
+  display: flex; align-items: center; gap: 7px;
+  height: 32px; padding: 0 13px 0 11px; flex: none;
+  border: 1px solid var(--line); border-radius: 9px;
+  background: var(--surface); color: var(--ink-2);
+  font: 550 12px/1 var(--ui); cursor: pointer; white-space: nowrap;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.textbtn:hover { color: var(--ink); border-color: var(--wire-hot); }
+.textbtn svg { width: 14px; height: 14px; flex: none; }
+
+.iconbtn { width: 34px; height: 34px; }
+#zoomval {
+  height: 26px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface);
+  color: var(--ink-2); font: 550 10.5px/1 var(--ui); display: grid; place-items: center;
+  font-variant-numeric: tabular-nums; cursor: pointer;
+}
+
+/* legend */
+#legend {
+  left: 16px; bottom: 16px;
+  background: var(--surface);
+  border: 1px solid var(--line); border-radius: 12px;
+  padding: 11px 13px;
+  display: grid; gap: 9px;
+  transition: opacity .2s, transform .2s;
+}
+#legend.hide { opacity: 0; transform: translateY(6px); pointer-events: none; }
+.legend-row { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+.legend-item {
+  display: flex; align-items: center; gap: 6px;
+  font: 500 10.5px/1 var(--ui); color: var(--ink-2); cursor: pointer; user-select: none;
+  transition: opacity .15s;
+}
+.legend-item.off { opacity: .3; }
+.legend-swatch { width: 9px; height: 9px; border-radius: 3px; background: var(--c); flex: none; }
+.legend-sep { height: 1px; background: var(--line); }
+.legend-item .rel-sample { width: 34px; height: 12px; overflow: visible; flex: none; }
+
+/* minimap */
+#minimap {
+  right: 16px; top: 66px;
+  width: 210px; height: 140px;
+  background: var(--surface);
+  border: 1px solid var(--line); border-radius: 12px;
+  overflow: hidden; cursor: crosshair;
+  transition: opacity .2s, transform .2s;
+}
+#minimap.hide { opacity: 0; transform: translateY(-6px); pointer-events: none; }
+#minimap svg { width: 100%; height: 100%; display: block; }
+.mini-node { fill: var(--ink-3); opacity: .5; }
+.mini-node.note { fill: var(--k-note); opacity: .45; }
+.mini-group { fill: none; stroke: var(--line); stroke-width: 2; }
+.mini-view { fill: color-mix(in oklab, var(--wire-hot) 14%, transparent); stroke: var(--wire-hot); stroke-width: 2; }
+
+/* inspector */
+#inspector {
+  right: 16px; top: 66px; width: 320px;
+  max-height: calc(100vh - 140px); overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--line); border-radius: 14px;
+  padding: 14px 16px 16px;
+  transform: translateX(calc(100% + 24px)); opacity: 0; pointer-events: none;
+  transition: transform .3s cubic-bezier(.22,.61,.36,1), opacity .25s;
+}
+#inspector.open { transform: none; opacity: 1; pointer-events: auto; }
+#inspector h3 { margin: 0 0 2px; font: 650 14px/1.3 var(--mono); color: var(--ink); }
+#inspector .path { font: 400 10.5px/1.5 var(--mono); color: var(--ink-3); word-break: break-all; margin-bottom: 12px; }
+#inspector .sec { font: 650 10px/1 var(--ui); text-transform: uppercase; letter-spacing: .07em; color: var(--ink-3); margin: 14px 0 7px; }
+#inspector .rel { display: flex; align-items: center; gap: 8px; padding: 5px 0; font: 400 11.5px var(--mono); color: var(--ink-2); cursor: pointer; }
+#inspector .rel:hover { color: var(--wire-hot); }
+#inspector .rel .tag {
+  font: 600 9px/1 var(--ui); text-transform: uppercase; letter-spacing: .04em;
+  padding: 3px 5px; border-radius: 4px; background: var(--surface-3); color: var(--ink-3); flex: none;
+}
+#inspector .close { position: absolute; top: 12px; right: 12px; }
+
+/* toast */
+#toast {
+  left: 50%; bottom: 24px; transform: translate(-50%, 14px);
+  background: var(--surface-3); border: 1px solid var(--line);
+  color: var(--ink); font: 500 12px var(--ui);
+  padding: 9px 14px; border-radius: 10px; box-shadow: var(--shadow-lift);
+  opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s;
+}
+#toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+/* help */
+#help {
+  inset: 0; display: grid; place-items: center;
+  background: color-mix(in oklab, var(--bg) 82%, transparent);
+  opacity: 0; pointer-events: none; transition: opacity .2s;
+}
+#help.open { opacity: 1; pointer-events: auto; }
+#help .sheet {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 16px;
+  box-shadow: var(--shadow-lift); padding: 22px 26px; min-width: 380px;
+}
+#help h2 { margin: 0 0 16px; font: 650 15px var(--ui); }
+#help dl { display: grid; grid-template-columns: auto 1fr; gap: 9px 18px; margin: 0; align-items: center; }
+#help dt { justify-self: start; }
+#help dd { margin: 0; font: 400 12px var(--ui); color: var(--ink-2); }
+#help kbd {
+  font: 550 10.5px/1 var(--mono); color: var(--ink);
+  border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px;
+  padding: 4px 6px; background: var(--surface-2); white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  #minimap, #legend { display: none; }
+  .hud-field input { width: 110px; }
+  .brand-title { max-width: 30vw; }
+}

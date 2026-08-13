@@ -1,0 +1,11 @@
+{
+  "name": "naamah",
+  "version": "0.1.0",
+  "description": "A diagram is a web. Turns a class diagram into one self-contained page you can pan, zoom, collapse, focus and search.",
+  "type": "module",
+  "bin": { "naamah": "./bin/naamah.mjs" },
+  "files": ["bin", "src", "README.md"],
+  "engines": { "node": ">=18" },
+  "license": "MIT",
+  "private": true
+}
