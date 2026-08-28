@@ -200,15 +200,60 @@ function parseEntity(tag, inner) {
   return { id, kind, name, stereotype, qname, ...box, rows };
 }
 
+/**
+ * The bounding box of an SVG path.
+ *
+ * A package frame is not always a `<rect>`: PlantUML 1.2026 draws it as a `<path>` with rounded
+ * corners and a notch for the label tab. Without a box, no card is geometrically inside any frame,
+ * every cluster then looks empty and gets pruned — so a diagram full of packages comes out with no
+ * domains at all, silently.
+ *
+ * Only ENDPOINTS count. Taking min/max over every number in `d` would fold arc radii and flag
+ * digits into the box and drag its corner toward the origin, so the commands are walked properly.
+ */
+function pathBox(d) {
+  const tok = String(d).match(/[MmLlHhVvCcSsQqTtAaZz]|-?\d*\.?\d+(?:e-?\d+)?/g) || [];
+  const PAIRS = { M: 1, L: 1, T: 1, S: 2, Q: 2, C: 3 };
+  let i = 0, cmd = null, x = 0, y = 0;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  const mark = () => { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); };
+  const n = () => parseFloat(tok[i++]) || 0;
+
+  while (i < tok.length) {
+    const at = i;
+    if (/^[A-Za-z]$/.test(tok[i])) { cmd = tok[i++]; continue; }
+    const up = (cmd || 'L').toUpperCase();
+    const rel = cmd === cmd?.toLowerCase();
+    if (up === 'H') { const v = n(); x = rel ? x + v : v; mark(); }
+    else if (up === 'V') { const v = n(); y = rel ? y + v : v; mark(); }
+    else if (up === 'A') {
+      n(); n(); n(); n(); n();                 // rx ry rotation large-arc sweep
+      const dx = n(), dy = n();
+      x = rel ? x + dx : dx; y = rel ? y + dy : dy; mark();
+    } else if (up === 'Z') { /* nothing to read */ }
+    else {
+      const pairs = PAIRS[up] || 1;
+      let dx = 0, dy = 0;
+      for (let p = 0; p < pairs; p++) { dx = n(); dy = n(); }   // only the last pair is the endpoint
+      x = rel ? x + dx : dx; y = rel ? y + dy : dy; mark();
+    }
+    if (i === at) i++;                         // never spin on a token nothing consumed
+  }
+  if (!Number.isFinite(x0)) return null;
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
 function parseCluster(tag, inner) {
   const rectTag = (inner.match(/<rect\b[^>]*>/) || [])[0] || '';
   const label = decode(((inner.match(/<text\b[^>]*>([\s\S]*?)<\/text>/) || [])[1] || '').replace(/<[^>]*>/g, ''));
+  const box = rectTag
+    ? { x: num(rectTag, 'x'), y: num(rectTag, 'y'), w: num(rectTag, 'width'), h: num(rectTag, 'height') }
+    : pathBox((inner.match(/<path\b[^>]*\bd="([^"]*)"/) || [])[1] || '') || { x: 0, y: 0, w: 0, h: 0 };
   return {
     id: attr(tag, 'id'),
     label,
     qname: decode(attr(tag, 'data-qualified-name') || label),
-    x: num(rectTag, 'x'), y: num(rectTag, 'y'),
-    w: num(rectTag, 'width'), h: num(rectTag, 'height'),
+    ...box,
   };
 }
 

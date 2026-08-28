@@ -272,6 +272,26 @@ html, body {
 }
 .explain > div { overflow: hidden; min-height: 0; }
 .card.lvl-1 .explain { grid-template-rows: 0fr; opacity: 0; margin-top: 0; margin-bottom: 0; }
+
+/* One row may disagree with its card, in either direction: `open` shows this comment while the rest
+   of the card stays folded, `shut` hides this one while the rest of the card is fully expanded.
+   Two classes rather than one toggle, because "collapsed" has two different defaults to override. */
+.card .row.open .explain { grid-template-rows: 1fr; opacity: 1; margin: 2px 0 4px 14px; }
+.card .row.shut .explain { grid-template-rows: 0fr; opacity: 0; margin-top: 0; margin-bottom: 0; }
+
+/* The affordance itself: a comment marker on the row, only where there is a comment to show. It
+   holds its space at every detail level so toggling it cannot change the card's width. */
+.row-note {
+  flex: none; margin-left: auto; padding: 0; width: 15px; height: 15px;
+  display: grid; place-items: center;
+  border: 0; border-radius: 4px; background: transparent; cursor: pointer;
+  color: var(--ink-3); opacity: .42;
+  transition: opacity .15s, color .15s, background .15s;
+}
+.row-note svg { width: 11px; height: 11px; }
+.row-note:hover { opacity: 1; color: var(--accent); background: var(--surface-2); }
+.row-note.on { opacity: 1; color: var(--accent); }
+.card.lvl-0 .row-note { display: none; }
 .explain p {
   margin: 0;
   padding: 2px 0 2px 11px;

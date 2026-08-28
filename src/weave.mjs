@@ -13,17 +13,18 @@ export class WeaveError extends Error {
 }
 
 /**
- * Render `input` (.puml or .svg) to self-contained pages.
+ * Read `input` (.puml or .svg) into graphs, writing nothing.
  *
- * ONE .puml CAN HOLD MANY DIAGRAMS. Each `@startuml <name>` block produces its own file, so this
- * never assumes the output is `<stem>.svg` — it renders into a scratch directory and weaves every
- * class-shaped diagram it finds. `output` is honoured only when there is exactly one; with several,
- * each page is named after its own diagram, because one explicit filename cannot name four files.
+ * ONE .puml CAN HOLD MANY DIAGRAMS. Each `@startuml <name>` block produces its own graph, so this
+ * never assumes the output is `<stem>.svg` — it renders into a scratch directory and reads every
+ * class-shaped diagram it finds.
  *
- * Returns { pages: [{ out, graph }], skipped: [names] }.
- * Throws WeaveError with a `code` for the CLI to exit on.
+ * Split out from `weave` so anything that wants the model rather than a page — `naamah totext`, a
+ * test, a tool — can have it without a file landing on disk as a side effect.
+ *
+ * Returns { renderable: [{ name, graph }], skipped: [names] }.
  */
-export function weave(input, output) {
+export function graphsOf(input) {
   if (!existsSync(input)) throw new WeaveError(`no such file: ${input}`, 1);
 
   let svgs = [];   // { name, text }
@@ -62,7 +63,20 @@ export function weave(input, output) {
       ? `none of the ${svgs.length} diagrams in ${basename(input)} is a class/component diagram`
       : 'this diagram carries no PlantUML entity metadata (class/component diagrams only)');
   }
+  return { renderable, skipped };
+}
 
+/**
+ * Render `input` (.puml or .svg) to self-contained pages.
+ *
+ * `output` is honoured only when there is exactly one diagram; with several, each page is named
+ * after its own diagram, because one explicit filename cannot name four files.
+ *
+ * Returns { pages: [{ out, graph }], skipped: [names] }.
+ * Throws WeaveError with a `code` for the CLI to exit on.
+ */
+export function weave(input, output) {
+  const { renderable, skipped } = graphsOf(input);
   const single = renderable.length === 1;
   const pages = renderable.map(({ name, graph }) => {
     const out = single && output ? output : `${name}.html`;

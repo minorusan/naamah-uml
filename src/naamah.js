@@ -38,6 +38,7 @@ const Naamah = (() => {
     moon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M13.5 9.5A5.8 5.8 0 016.5 2.5a5.8 5.8 0 107 7z"/></svg>',
     sun: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="3"/><path d="M8 1v1.6M8 13.4V15M1 8h1.6M13.4 8H15M3.1 3.1l1.1 1.1M11.8 11.8l1.1 1.1M12.9 3.1l-1.1 1.1M4.2 11.8l-1.1 1.1"/></svg>',
     note: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M3 2h7l3 3v9H3z"/><path d="M10 2v3h3"/></svg>',
+    comment: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M2.5 3h11v7.5h-6L4 13.5V10.5H2.5z"/></svg>',
     map: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M1.5 4l4-2 5 2 4-2v10l-4 2-5-2-4 2z"/><path d="M5.5 2v10M10.5 4v10"/></svg>',
     help: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="8" cy="8" r="6.2"/><path d="M6.2 6.1a1.9 1.9 0 113.1 1.6c-.7.5-1.3.8-1.3 1.7"/><path d="M8 11.6v.01"/></svg>',
     close: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
@@ -337,13 +338,33 @@ const Naamah = (() => {
             continue;
           }
           const row = el('div', `row row-${r.kind}`);
-          row.append(el('div', 'row-main', `${visRow(r.vis)}<span class="sig">${rich(r.text)}</span>`));
+          const main = el('div', 'row-main', `${visRow(r.vis)}<span class="sig">${rich(r.text)}</span>`);
+          row.append(main);
           if (r.explain?.length) {
             const ex = el('div', 'explain');
             const inner = el('div');
             for (const p of r.explain) inner.append(el('p', null, rich(p)));
             ex.append(inner);
             row.append(ex);
+
+            // ONE comment, on its own. The detail level is a whole-card switch, which is the wrong
+            // instrument when a reader wants the note on a single member and nothing else — and
+            // going to level 3 to read one line opens every comment in the diagram at once.
+            // `open` and `shut` are separate classes rather than one toggle because the row has to
+            // be able to disagree with the card in BOTH directions.
+            const bump = el('button', 'row-note', ICON.comment);
+            bump.title = 'Show the comment on this member / hide it again';
+            bump.onclick = (ev) => {
+              ev.stopPropagation();
+              const showing = row.classList.contains('open') ||
+                (!row.classList.contains('shut') && card.classList.contains('lvl-2'));
+              row.classList.toggle('open', !showing);
+              row.classList.toggle('shut', showing);
+              bump.classList.toggle('on', !showing);
+              schedule(false, true);
+              relayoutWhenSettled({ seeds: [n.id] });
+            };
+            main.append(bump);
           }
           rows.append(row);
         }
@@ -1562,169 +1583,9 @@ const Naamah = (() => {
     };
   }
 
-  /* ─────────────────────────  builder  ─────────────────────────
-   *
-   * Authoring a diagram directly, with no PlantUML anywhere:
-   *
-   *   const loom = Naamah.create('Rewards');
-   *
-   *   const rewards = loom.domain('Rewards › asmdef');
-   *   const api = rewards.type('IRewardService', { kind: 'interface' });
-   *   const svc = rewards.type('RewardService');
-   *
-   *   svc.implements(api);
-   *   svc.owns(entry);
-   *   svc.uses(cfg);
-   *   svc.field('_live : List<Entry>', { vis: 'private', explain: 'everything running now' });
-   *
-   *   Naamah.mount(loom.build());
-   *
-   * build() emits exactly the JSON mount() takes. Positions are NOT part of the model —
-   * a caller describes structure and the layout engine decides where things go. Declaration
-   * order is the only spatial hint, and it feeds the same reading-order sort the PlantUML
-   * path uses.
-   */
-
-  const VIS = {
-    public: 'PUBLIC', private: 'PRIVATE', protected: 'PROTECTED', package: 'PACKAGE',
-    '+': 'PUBLIC', '-': 'PRIVATE', '#': 'PROTECTED', '~': 'PACKAGE',
-  };
-  const LINKS = {
-    extends: ['extension', false],
-    implements: ['extension', true],      // realization: UML draws it dashed
-    owns: ['composition', false],
-    has: ['aggregation', false],
-    uses: ['dependency', true],
-    refers: ['association', false],
-  };
-
-  // Rough text width for a monospace card at the runtime's own font size. Only a starting
-  // guess: the real width is measured from the DOM on the first layout pass.
-  const guessWidth = (strings) =>
-    clamp(Math.max(0, ...strings.map((s) => String(s).length)) * 7.3 + 40, 180, 520);
-
-  function create(title = 'Diagram') {
-    let seq = 0;
-    const id = (p) => `${p}${++seq}`;
-    const clusters = [], nodes = [], notes = [], edges = [];
-
-    const domainHandle = (c) => ({
-      _id: c.id, _kind: 'domain',
-      get id() { return c.id; },
-      domain: (label, opts = {}) => makeDomain(label, { ...opts, in: c.id }),
-      type: (name, opts = {}) => makeType(name, { ...opts, in: c.id }),
-    });
-
-    function makeDomain(label, opts = {}) {
-      const c = { id: opts.id || id('dom'), label: String(label), parent: ref(opts.in) };
-      clusters.push(c);
-      return domainHandle(c);
-    }
-
-    const ref = (v) => (v == null ? null : typeof v === 'string' ? v : v._id ?? v.id ?? null);
-
-    function makeType(name, opts = {}) {
-      const n = {
-        id: opts.id || id('t'),
-        name: String(name),
-        kind: opts.kind || 'class',
-        stereotype: opts.stereotype || null,
-        cluster: ref(opts.in),
-        rows: [],
-      };
-      nodes.push(n);
-
-      const row = (kind, text, o = {}) => {
-        // vis: 'none' (or null) suppresses the bullet — needed for continuation lines of a
-        // wrapped member, which are rows visually but not members in their own right.
-        const vis = !o.vis || o.vis === 'none'
-          ? null
-          // Method vs field marker follows the SIGNATURE, not the keyword: `event Released`
-          // has no parentheses and is a field, `event Activated(...)` is a method.
-          : `${VIS[o.vis] || 'PUBLIC'}_${kind === 'method' || (kind === 'event' && /\(/.test(String(text))) ? 'METHOD' : 'FIELD'}`;
-        const explain = o.explain == null ? [] : Array.isArray(o.explain) ? o.explain : [o.explain];
-        n.rows.push({ vis, kind, text: String(text), explain: explain.map(String) });
-        return handle;
-      };
-
-      const link = (verb) => (other, o = {}) => {
-        const [type, dashed] = LINKS[verb];
-        edges.push({ id: id('lnk'), from: ref(o.reverse ? other : handle), to: ref(o.reverse ? handle : other), type, dashed });
-        return handle;
-      };
-
-      const handle = {
-        _id: n.id, _kind: 'type',
-        get id() { return n.id; },
-        field: (t, o) => row('field', t, { vis: 'public', ...o }),
-        method: (t, o) => row('method', t, { vis: 'public', ...o }),
-        event: (t, o) => row('event', t, { vis: 'public', ...o }),
-        // A lede is a prose row with no bullet — but it can still carry explanations
-        // under it, so it must accept the same options as any other row.
-        lede: (t, o) => row('lede', t, { vis: 'none', ...o }),
-        note: (title2, body) => makeNote(title2, body, { on: n.id }),
-        // UML verbs read from the subject: svc.implements(api), svc.owns(entry)
-        extends: link('extends'),
-        implements: link('implements'),
-        owns: link('owns'),
-        has: link('has'),
-        uses: link('uses'),
-        refers: link('refers'),
-      };
-      return handle;
-    }
-
-    function makeNote(title2, body = [], opts = {}) {
-      const note = {
-        id: opts.id || id('note'),
-        kind: 'note',
-        name: String(title2),
-        body: (Array.isArray(body) ? body : [body]).map(String),
-        attachedTo: ref(opts.on),
-        cluster: null,
-      };
-      notes.push(note);
-      return { _id: note.id, _kind: 'note', get id() { return note.id; } };
-    }
-
-    return {
-      domain: (label, opts) => makeDomain(label, opts),
-      type: (name, opts) => makeType(name, opts),
-      note: (t, body, opts) => makeNote(t, body, opts),
-      link: (from, to, verb = 'refers') => {
-        const [type, dashed] = LINKS[verb] || LINKS.refers;
-        edges.push({ id: id('lnk'), from: ref(from), to: ref(to), type, dashed });
-      },
-
-      build() {
-        // Declaration order is the only spatial input. Everything gets a nominal column so
-        // the reading-order sort has something to work with; the layout does the rest.
-        const known = new Set([...nodes, ...notes].map((n) => n.id));
-        for (const e of edges) {
-          if (!known.has(e.from) || !known.has(e.to)) {
-            throw new Error(`link references an unknown node: ${e.from} -> ${e.to}`);
-          }
-        }
-        const cid = new Set(clusters.map((c) => c.id));
-        for (const c of clusters) {
-          if (c.parent && !cid.has(c.parent)) throw new Error(`domain "${c.label}" has an unknown parent`);
-        }
-
-        let row = 0;
-        const place = (n, strings) => {
-          n.x = 0; n.y = row++ * 120;
-          n.w = guessWidth(strings); n.h = 60;
-        };
-        for (const n of nodes) place(n, [n.name, ...n.rows.map((r) => r.text)]);
-        for (const n of notes) place(n, [n.name, ...n.body]);
-        for (const c of clusters) { c.x = 0; c.y = 0; c.w = 0; c.h = 0; }
-
-        return { title, layout: 'auto', clusters, nodes, notes, edges };
-      },
-    };
-  }
-
-  return { mount, create };
+  // The authoring API (`create`) lives in loom.mjs and is attached by whoever builds the page: it
+  // has to run in Node too, where a `fromFile` binding can actually read a file.
+  return { mount };
 })();
 
 if (typeof window !== 'undefined') window.Naamah = Naamah;

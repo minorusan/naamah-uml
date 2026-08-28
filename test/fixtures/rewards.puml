@@ -1,0 +1,26 @@
+@startuml rewards
+package "Rewards" {
+  interface IRewardService {
+    + Live : IReadOnlyList<Entry>
+    .. read-only view of what is running ..
+    + Activate(RewardType, int) : int
+  }
+  class RewardService {
+    - _live : List<Entry>
+    + Activate(RewardType, int) : int
+  }
+  enum RewardType {
+    None
+    Coins
+  }
+}
+package "Core" {
+  interface IClock {
+    + Now : float
+  }
+}
+RewardService ..|> IRewardService
+RewardService ..> RewardType
+RewardService --> IClock
+note right of RewardService : Parallel by default.
+@enduml
