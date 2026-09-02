@@ -16,7 +16,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
@@ -124,8 +124,47 @@ function parseDiagnostic(line) {
 export function verifyDesign(files, { dir, compiler } = {}) {
   const cwd = dir || (files[0] && dirname(files[0])) || process.cwd();
   const cs = files.filter((f) => /\.cs$/i.test(f));
-  const ts = files.filter((f) => /\.(ts|tsx|mts|cts)$/i.test(f));
+  const ts = files.filter((f) => /\.(ts|tsx|mts|cts|js|mjs|cjs)$/i.test(f));
   return cs.length ? verifyCs(cs, cwd, compiler) : verifyTs(ts, cwd, compiler);
+}
+
+/**
+ * A `.js` design, typechecked as what it actually is.
+ *
+ * A design file is DECLARATIONS — `declare class Game { start(): void }` — which is TypeScript syntax
+ * whatever the file is called. tsc picks its parser from the EXTENSION, so it reads a `.js` file as
+ * JavaScript and rejects the annotations; `--allowJs` does not change that. So a `.js` design compiles
+ * through a `.ts` SHADOW in a temp directory, and the diagnostics are mapped back to the name the
+ * author actually has open. Nothing is written beside the design, and the shadow goes either way.
+ *
+ * Why accept `.js` at all: a browser project's source is `.js`, and a design directory whose files
+ * cannot share the extension of the code they describe is one more thing to explain to everyone who
+ * opens it.
+ */
+function shadowJs(files) {
+  const isJs = (f) => /\.(js|mjs|cjs)$/i.test(f);
+  if (!files.some(isJs)) return { files, back: (o) => o, cleanup: () => {} };
+  const tmp = mkdtempSync(join(tmpdir(), 'naamah-js-'));
+  const map = new Map();
+  const shadowed = files.map((f) => {
+    if (!isJs(f)) return f;
+    const dest = join(tmp, `${basename(f).replace(/\.(js|mjs|cjs)$/i, '')}.ts`);
+    writeFileSync(dest, readFileSync(f, 'utf8'));
+    map.set(dest, f);
+    return dest;
+  });
+  const back = (out) => {
+    let text = out;
+    for (const [shadow, real] of map) {
+      text = text.split(shadow).join(real).split(basename(shadow)).join(basename(real));
+    }
+    return text;
+  };
+  return {
+    files: shadowed,
+    back,
+    cleanup: () => { try { rmSync(tmp, { recursive: true, force: true }); } catch { /* temp only */ } },
+  };
 }
 
 function verifyTs(files, cwd, compiler) {
@@ -134,15 +173,21 @@ function verifyTs(files, cwd, compiler) {
     return { ran: false, ok: false, compiler: null, diagnostics: [], output: '', lang: 'ts',
       why: 'no TypeScript compiler found — install one (npm i -D typescript) to typecheck the design' };
   }
-  const run = spawnSync(tsc, [
-    '--noEmit',
-    '--experimentalDecorators',       // the decorators ARE the relation syntax
-    '--target', 'ES2022',
-    '--moduleResolution', 'node',
-    ...files,
-  ], { encoding: 'utf8', cwd });
+  const shadow = shadowJs(files);
+  let run;
+  try {
+    run = spawnSync(tsc, [
+      '--noEmit',
+      '--experimentalDecorators',       // the decorators ARE the relation syntax
+      '--target', 'ES2022',
+      '--moduleResolution', 'node',
+      ...shadow.files,
+    ], { encoding: 'utf8', cwd });
+  } finally {
+    shadow.cleanup();
+  }
   if (run.error) throw new VerifyError(`could not run ${tsc}: ${run.error.message}`);
-  return finish(run, tsc, 'ts');
+  return finish(run, tsc, 'ts', shadow.back);
 }
 
 function verifyCs(files, cwd, compiler) {
@@ -160,8 +205,8 @@ function verifyCs(files, cwd, compiler) {
   return finish(run, mcs, 'cs');
 }
 
-function finish(run, compiler, lang) {
-  const output = `${run.stdout || ''}${run.stderr || ''}`.trim();
+function finish(run, compiler, lang, back = (o) => o) {
+  const output = back(`${run.stdout || ''}${run.stderr || ''}`.trim());
   const diagnostics = output.split('\n').map(parseDiagnostic).filter(Boolean);
   return { ran: true, ok: run.status === 0, compiler, diagnostics, output, lang };
 }

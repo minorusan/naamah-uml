@@ -16,8 +16,15 @@ export class BuildError extends Error {}
 /** Directories that never hold a design and are expensive to walk. */
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', 'bin', 'obj', '.next', 'coverage']);
 
-/** Extensions a design file may have. */
-const DESIGN_EXT = new Set(['.ts', '.cs', '.py']);
+/**
+ * Extensions a design file may have.
+ *
+ * `.js` is here because a browser project's source IS `.js`, and a design directory whose files cannot
+ * share the extension of the code they describe is one more thing to explain to everyone who opens it.
+ * The CONTENT is unchanged — a design is `declare class X { … }` whatever it is called — so a `.js`
+ * design is typechecked through a `.ts` shadow (`verify.mjs#shadowJs`) rather than by a second parser.
+ */
+const DESIGN_EXT = new Set(['.ts', '.cs', '.py', '.js', '.mjs', '.cjs']);
 
 /**
  * The vocabulary file, which compiles WITH the design but is not part of it.
@@ -96,7 +103,7 @@ export function buildDesign(dir, { verify = true, title } = {}) {
   const design = all.filter((p) => !isPrelude(p));
   if (!design.length) {
     throw new BuildError(
-      `no design files in ${dir} — add a .ts file with a class in it, or see ${basename(prelude.path)} ` +
+      `no design files in ${dir} — add a .ts or .js file with a class in it, or see ${basename(prelude.path)} ` +
       `for the vocabulary`);
   }
 
