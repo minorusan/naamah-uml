@@ -14,8 +14,9 @@
 
 export const EXT_LANG = {
   '.cs': 'cs',
-  '.ts': 'ts', '.tsx': 'ts', '.mts': 'ts', '.cts': 'ts', '.js': 'ts', '.mjs': 'ts', '.jsx': 'ts',
+  '.ts': 'ts', '.tsx': 'ts', '.mts': 'ts', '.cts': 'ts', '.js': 'ts', '.mjs': 'ts', '.cjs': 'ts', '.jsx': 'ts',
   '.py': 'py', '.pyi': 'py',
+  '.html': 'html', '.htm': 'html',
 };
 
 export class SourceError extends Error {}
@@ -32,11 +33,43 @@ export function langOf(path) {
   return lang;
 }
 
+/**
+ * A page's inline JavaScript, at its real line numbers.
+ *
+ * A browser project's classes very often live in a `<script>` in the page rather than in a file of
+ * their own, and a reader who cannot see them there is reading half the project. Everything that is
+ * not script body is blanked SPACE-FOR-CHARACTER and newline-for-newline rather than removed, so a
+ * type found here reports the line it actually occupies in the .html — an extractor that shifts line
+ * numbers is worse than one that finds nothing, because the citation looks right and is not.
+ *
+ * A `src=` script has no body to read; a `type=` that is not JavaScript (`text/template`,
+ * `application/json`, an import map) is not JavaScript and is blanked with the rest.
+ */
+function htmlScripts(text) {
+  const blank = (s) => s.replace(/[^\n]/g, ' ');
+  const isJs = (attrs) => !/\bsrc\s*=/i.test(attrs)
+    && (!/\btype\s*=/i.test(attrs)
+      || /\btype\s*=\s*["']?\s*(module|text\/javascript|application\/javascript|text\/babel)/i.test(attrs));
+  const re = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
+  let out = '';
+  let last = 0;
+  for (let m; (m = re.exec(text)); ) {
+    const body = m[2];
+    const bodyStart = text.indexOf('>', m.index) + 1;
+    out += blank(text.slice(last, bodyStart));
+    out += isJs(m[1]) ? body : blank(body);
+    last = bodyStart + body.length;
+  }
+  out += blank(text.slice(last));
+  return out;
+}
+
 /** Every type declared in `text`, in declaration order. */
 export function parseSource(text, lang) {
   if (typeof text !== 'string') throw new SourceError('parseSource needs the file text as a string');
   switch (lang) {
     case 'cs': return parseCs(text);
+    case 'html': return parseTs(htmlScripts(text));
     case 'ts': return parseTs(text);
     case 'py': return parsePy(text);
     default: throw new SourceError(`unknown language "${lang}"`);
