@@ -127,6 +127,19 @@ const VIS_WORD = { public: 'public', private: 'private', protected: 'protected',
  * "Top-level" means at paren depth 0, which is the whole trick: `constructor(limit = MAX) { … }`
  * has an `=` but it is a DEFAULT ARGUMENT, and that `{` really is a body.
  */
+/**
+ * Does the text so far end where a TYPE is expected, rather than after a complete signature?
+ *
+ * Read right-to-left over trailing whitespace. `=>` is checked before the single characters so a
+ * function type (`cb: () => { a: number }`) is not mistaken for a body.
+ */
+function typeBraceAhead(buf) {
+  const t = String(buf).replace(/\s+$/, '');
+  if (!t) return false;
+  if (t.endsWith('=>')) return true;
+  return ':|&<,('.includes(t[t.length - 1]);
+}
+
 function declStream(text) {
   const decls = [];
   const src = text;
@@ -179,13 +192,28 @@ function declStream(text) {
         if (src[j] === ch) { j++; break; }
         j++;
       }
-      buf += '""';
+      // THE TEXT IS KEPT, not blanked to `""`. Depth safety comes from having CONSUMED the literal
+      // in the loop above — its braces and parens were never counted — so there is nothing left for
+      // blanking to protect against, and blanking destroys the one thing an annotation carries:
+      // `@Domain('Rewards')` arrived as `@Domain("")`, so every domain in a design was named "".
+      buf += src.slice(i, j);
       i = j;
       continue;
     }
 
     if (ch === '{') {
       if (valueSide || initDepth) { initDepth++; buf += ' { '; i++; continue; }
+      // A `{` IN A TYPE POSITION IS AN INLINE OBJECT TYPE, NOT A BODY.
+      //
+      // `private entries: { amount: number }[] = [];` and `append(e: { amount: number }): void {}`
+      // both put braces where a body cannot go. Counted as a body, the declaration was emitted early
+      // and the MEMBER ITSELF WAS LOST — silently, one member per inline type, so a class read as
+      // having no members at all while its neighbours parsed fine.
+      //
+      // The discriminator is what sits immediately before the brace. A type brace follows the syntax
+      // that introduces a type — `:` `|` `&` `<` `,` `(` or an arrow — whereas a body brace follows a
+      // COMPLETE signature or name: `m(): void {`, `class X {`. Cheap, and it cannot confuse the two.
+      if (typeBraceAhead(buf)) { initDepth++; buf += ' { '; i++; continue; }
       emit('{'); depth++; i++; continue;
     }
     if (ch === '}') {
@@ -209,9 +237,54 @@ function declStream(text) {
   return decls;
 }
 
-/** Peel modifier keywords (and attributes/decorators) off the front of a declaration. */
+/**
+ * Peel leading ANNOTATIONS off a declaration — C# `[Attr(…)]`, TS/Python `@Name(…)` — and KEEP them.
+ *
+ * KEEPING THEM IS THE WHOLE POINT. A type's annotations are where a diagram's RELATIONS are
+ * declared, so discarding them here discards the edges.
+ *
+ * Balanced scanning, not a regex. The `\[[^\]]*\]` this replaces stopped at the FIRST `]`, which
+ * lands mid-attribute in `[Owns(typeof(Entry[]))]`; `@Uses<Map<string, IConfig>>()` nests the same
+ * way. A half-eaten annotation leaves a fragment that then fails every match downstream.
+ */
+function peelAnnotations(code) {
+  let s = String(code).trim();
+  const annotations = [];
+  /** Index just past the balanced group opening at `from`, or -1 if it never closes. */
+  const scan = (open, close, from) => {
+    let d = 0;
+    for (let i = from; i < s.length; i++) {
+      const c = s[i];
+      if (c === open) d++;
+      else if (c === close && --d === 0) return i + 1;
+    }
+    return -1;
+  };
+  for (;;) {
+    if (s.startsWith('[')) {
+      const end = scan('[', ']', 0);
+      if (end < 0) break;                    // unbalanced — not ours to interpret
+      annotations.push(s.slice(0, end));
+      s = s.slice(end).trim();
+      continue;
+    }
+    const at = s.match(/^@[\w$.]+/);
+    if (!at) break;
+    let end = at[0].length;
+    // `@Uses<IConfig>()` — a type-argument list can precede the call, and for an INTERFACE it is the
+    // only form that survives: TS erases interfaces, so `@Uses(IConfig)` is not a value.
+    if (s[end] === '<') { const e = scan('<', '>', end); if (e < 0) break; end = e; }
+    if (s[end] === '(') { const e = scan('(', ')', end); if (e < 0) break; end = e; }
+    annotations.push(s.slice(0, end));
+    s = s.slice(end).trim();
+  }
+  return { annotations, rest: s };
+}
+
+/** Peel modifier keywords (and annotations) off the front of a declaration. */
 function peel(code, words) {
-  let s = String(code).replace(/^\s*(?:\[[^\]]*\]\s*)+/, '').replace(/^\s*(?:@[\w.]+(?:\([^)]*\))?\s*)+/, '').trim();
+  const { annotations, rest } = peelAnnotations(code);
+  let s = rest;
   const mods = [];
   for (;;) {
     const m = s.match(/^([A-Za-z_#]\w*)\b\s*/);
@@ -219,7 +292,7 @@ function peel(code, words) {
     mods.push(m[1]);
     s = s.slice(m[0].length);
   }
-  return { mods, rest: s.trim() };
+  return { mods, rest: s.trim(), annotations };
 }
 
 /** The index of the `)` matching the first `(`, or -1. */
@@ -249,7 +322,7 @@ function topSplit(s, sep = ',') {
 }
 
 const mkType = (name, kind, over = {}) => ({
-  name, kind, stereotype: null, extends: [], implements: [], doc: [], rows: [], ...over,
+  name, kind, stereotype: null, extends: [], implements: [], annotations: [], doc: [], rows: [], ...over,
 });
 
 const mkRow = (kind, text, vis, comments) => ({
@@ -303,7 +376,8 @@ function parseCs(text) {
     const head = d.term === '{' ? csType(d) : null;
     if (head) {
       const t = mkType(head.name, head.kind, {
-        extends: head.extends, implements: head.implements, doc: paragraphs(d.comments),
+        extends: head.extends, implements: head.implements, annotations: head.annotations || [],
+        doc: paragraphs(d.comments),
       });
       types.push(t);
       open.push({ type: t, bodyDepth: d.depth + 1 });
@@ -320,7 +394,12 @@ function parseCs(text) {
 
 function csType(d) {
   // `record struct` / `record class` are those kinds; a bare `record` is a class.
-  const code = d.code.replace(/\brecord\s+(struct|class)\b/, '$1').replace(/\brecord\b/, 'class');
+  const raw = d.code.replace(/\brecord\s+(struct|class)\b/, '$1').replace(/\brecord\b/, 'class');
+  // ANNOTATIONS COME OFF FIRST, and this is not a tidy-up — it is the difference between a type
+  // existing and not. The `[=)]` guard below rejects any preamble containing `)`, and
+  // `[Owns(typeof(Entry))]` is exactly that, so every annotated class was silently dropped: the
+  // diagram simply lost it, with nothing logged and no error raised.
+  const { annotations, rest: code } = peelAnnotations(raw);
   const m = code.match(/\b(class|interface|struct|enum)\s+([A-Za-z_]\w*)\s*(<[^>{]*>)?\s*(?::\s*([\s\S]*))?$/);
   if (!m) return null;
   const before = code.slice(0, m.index);
@@ -334,7 +413,7 @@ function csType(d) {
     if (i === 0 && !/^I[A-Z]/.test(bare(b)) && kind !== 'interface') ex.push(b);
     else im.push(b);
   }
-  return { name: m[2] + (m[3] ? tidy(m[3]) : ''), kind, extends: ex, implements: im };
+  return { name: m[2] + (m[3] ? tidy(m[3]) : ''), kind, extends: ex, implements: im, annotations };
 }
 
 function csMember(d, type) {
@@ -414,7 +493,8 @@ function parseTs(text) {
     const head = d.term === '{' ? tsType(d) : null;
     if (head) {
       const t = mkType(head.name, head.kind, {
-        extends: head.extends, implements: head.implements, doc: paragraphs(d.comments),
+        extends: head.extends, implements: head.implements, annotations: head.annotations || [],
+        doc: paragraphs(d.comments),
       });
       types.push(t);
       open.push({ type: t, bodyDepth: d.depth + 1 });
@@ -427,10 +507,13 @@ function parseTs(text) {
 }
 
 function tsType(d) {
-  const m = d.code.match(
+  // Decorators off first — same reason as `csType`: the `[=(]` guard below treats `@Owns(Entry)` as
+  // proof this is not a declaration, and drops the class entirely.
+  const { annotations, rest: code } = peelAnnotations(d.code);
+  const m = code.match(
     /\b(class|interface|enum)\s+([A-Za-z_$][\w$]*)\s*(<[^{]*?>)?\s*((?:extends|implements)[\s\S]*)?$/);
   if (!m) return null;
-  const before = d.code.slice(0, m.index);
+  const before = code.slice(0, m.index);
   if (/[=(]/.test(before)) return null;
   const kind = /\babstract\b/.test(before) && m[1] === 'class' ? 'abstract' : TS_KINDS[m[1]];
   const tail = m[4] || '';
@@ -440,7 +523,10 @@ function tsType(d) {
   };
   // A TS interface `extends` other interfaces. UML has one arrow for "an interface refines an
   // interface" — generalization — so that is where it goes.
-  return { name: m[2] + (m[3] ? tidy(m[3]) : ''), kind, extends: grab('extends'), implements: grab('implements') };
+  return {
+    name: m[2] + (m[3] ? tidy(m[3]) : ''), kind,
+    extends: grab('extends'), implements: grab('implements'), annotations,
+  };
 }
 
 function tsMember(d, type) {

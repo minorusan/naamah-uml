@@ -26,6 +26,8 @@ import { create, syncGraph } from '../src/loom.mjs';
 import { renderPage, extractGraph } from '../src/page.mjs';
 import { toText } from '../src/totext.mjs';
 import { BindError } from '../src/bind.mjs';   // imported for its side effect too: it installs the reader
+import { buildProject, parseAnnotation, ProjectError } from '../src/project.mjs';
+import { buildDesign, BuildError } from '../src/build.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixture = (f) => join(here, 'fixtures', f);
@@ -418,6 +420,156 @@ try {
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }
+
+
+/* ─────────────────────  the design directory  ─────────────────────
+ *
+ * The format's promise is that an agent writes a plain annotated class and the diagram grows. Two
+ * things have to hold for that, and both failed silently before they were tested:
+ *
+ *  - an ANNOTATED type must survive the reader at all. `csType`/`tsType` reject a declaration whose
+ *    preamble contains `(` or `)` — a guard against locals and lambdas — and `@Owns<X>()` is
+ *    exactly that shape, so every type carrying a relation simply vanished from the diagram.
+ *  - a relation must be declarable from EITHER end and still draw ONCE. Keying de-duplication on
+ *    the pair PLUS the edge type meant an explicit `@Owns` and an inferred field edge were
+ *    different keys, so one card grew two arrows to the same target making contradictory claims.
+ */
+
+const design = (files) => buildProject(
+  Object.entries(files).map(([path, text]) => ({ path, text })), { title: 'T' });
+const edgeOf = (g, from, to) => g.edges.find((e) => e.from === from && e.to === to);
+
+test('design — an annotated type survives the reader', () => {
+  const g = design({ 'a.ts': '@Domain("D")\n@Owns<Entry>()\nclass Svc {}\nclass Entry {}' });
+  eq(g.nodes.length, 2, 'both types are cards');
+  ok(g.nodes.some((n) => n.name === 'Svc'), 'the ANNOTATED one is not dropped');
+});
+
+test('design — a relation declared from either end is one edge', () => {
+  const near = design({ 'a.ts': '@Uses<Ledger>()\nclass Svc {}\nclass Ledger {}' });
+  const far  = design({ 'a.ts': 'class Svc {}\n@UsedBy<Svc>()\nclass Ledger {}' });
+  eq(near.edges.length, 1, 'declared from the subject');
+  eq(far.edges.length, 1, 'declared from the object');
+  eq(edgeOf(near, 'Svc', 'Ledger').type, 'dependency', 'same direction');
+  eq(edgeOf(far, 'Svc', 'Ledger').type, 'dependency', 'and the same type, from the far end');
+});
+
+test('design — saying it from BOTH ends is agreement, not a second arrow', () => {
+  const g = design({
+    'a.ts': '@Uses<Ledger>()\nclass Svc {}',
+    'b.ts': '@UsedBy<Svc>()\nclass Ledger {}',
+  });
+  eq(g.edges.length, 1, 'one edge, not two');
+});
+
+test('design — an explicit relation beats the field it also holds', () => {
+  const g = design({ 'a.ts': '@Owns<Entry>()\nclass Svc { private e: Entry; }\nclass Entry {}' });
+  eq(g.edges.length, 1, 'the field does not add a second, contradictory arrow');
+  eq(edgeOf(g, 'Svc', 'Entry').type, 'composition', 'and the DECLARED relation is the one kept');
+});
+
+test('design — a bare field still implies an edge on its own', () => {
+  const g = design({ 'a.ts': 'class Svc { private e: Entry; }\nclass Entry {}' });
+  eq(edgeOf(g, 'Svc', 'Entry').type, 'aggregation', 'zero ceremony still draws');
+});
+
+test('design — a field naming a type outside the design draws nothing', () => {
+  const g = design({ 'a.ts': 'class Svc { private s: string; private n: Promise<number>; }' });
+  eq(g.edges.length, 0, 'library types are not cards, so no arrow points at them');
+});
+
+test('design — domains nest, and a note keeps its commas', () => {
+  const g = design({ 'a.ts': '@Domain("A › B")\n@Note("one, two, three")\nclass Svc {}' });
+  eq(g.clusters.length, 2, 'A and B');
+  eq(g.clusters[1].parent, g.clusters[0].id, 'B nests inside A');
+  eq(g.notes[0].body[0], 'one, two, three', 'the note is not cut at its first comma');
+});
+
+test('design — @Kind overrides what the host language could not say', () => {
+  const g = design({ 'a.ts': '@Kind("struct")\nclass Money {}' });
+  eq(g.nodes[0].kind, 'struct', 'TypeScript has no value types; the design says so anyway');
+});
+
+test('design — two types with one name is refused', () => {
+  let msg = '';
+  try { design({ 'a.ts': 'class X {}', 'b.ts': 'class X {}' }); }
+  catch (err) { msg = err.message; }
+  ok(/two types named X/.test(msg), `names are the diagram's identity — got: ${msg}`);
+});
+
+test('design — annotations parse in both spellings', () => {
+  eq(parseAnnotation('@Owns<Entry>()').typeArgs.join(), 'Entry', 'the type form');
+  eq(parseAnnotation('@Owns(Entry)').args.join(), 'Entry', 'the value form');
+  eq(parseAnnotation('[Owns(typeof(Entry))]').args.join(), 'typeof(Entry)', 'the C# form');
+  eq(parseAnnotation('@Note("a, b")').args.length, 1, 'a quoted comma is not an argument separator');
+});
+
+{
+  const dir = mkdtempSync(join(tmpdir(), 'naamah-design-'));
+  try {
+    test('design — a module keyword is refused with the REASON, not a compiler cascade', () => {
+      writeFileSync(join(dir, 'a.ts'), 'export class Svc {}\n');
+      let msg = '';
+      try { buildDesign(dir, { verify: false }); }
+      catch (err) { msg = err.message; }
+      ok(/must be a SCRIPT, not a module/.test(msg), `named at the cause — got: ${msg}`);
+      ok(/export on line 1/.test(msg), 'and points at the line');
+    });
+
+    test('design — the vocabulary is written beside a design that lacks it', () => {
+      // A FRESH directory: the test above already built in `dir`, so the prelude is there and
+      // `ensurePrelude` would correctly report it did not write one.
+      const fresh = mkdtempSync(join(tmpdir(), 'naamah-fresh-'));
+      writeFileSync(join(fresh, 'a.ts'), 'class Svc {}\n');
+      const r = buildDesign(fresh, { verify: false });
+      ok(r.prelude.written, 'naamah.ts is written on first build');
+      ok(readFileSync(r.prelude.path, 'utf8').includes('declare function Owns'),
+        'and it declares the vocabulary ambiently, so design files need no import');
+      eq(r.graph.nodes.length, 1, 'the prelude itself is never a card');
+      rmSync(fresh, { recursive: true, force: true });
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+
+/* ───────────────  an inline object type is not a body  ───────────────
+ *
+ * Found by an agent writing a design and the diagram coming back with a class that had NO members.
+ * `private entries: { amount: number }[] = []` puts braces where a body cannot go; counted as a body,
+ * the declaration was emitted early and the member itself was LOST — silently, one per inline type.
+ * Exactly the truncation this file's header warns about, and it survived 24 tests because no fixture
+ * used an inline object type.
+ */
+const rowsOfFirst = (src, lang = 'ts') => (parseSource(src, lang)[0]?.rows ?? []).map((r) => r.text);
+
+test('ts — an inline object type in a FIELD does not eat the field', () => {
+  const r = rowsOfFirst('class A { private e: { a: number } = {}; m(): void {} }');
+  eq(r.length, 2, `both members survive — got ${JSON.stringify(r)}`);
+  ok(/^e /.test(r[0]), 'the field is first');
+});
+
+test('ts — an inline object type in a PARAM does not eat the method', () => {
+  const r = rowsOfFirst('class B { m(p: { a: number }): void {} n(): void {} }');
+  eq(r.length, 2, `both methods survive — got ${JSON.stringify(r)}`);
+});
+
+test('ts — an array of inline objects survives, semicolons and all', () => {
+  const r = rowsOfFirst('class C { private e: { a: number; b: string }[] = []; m(): void {} }');
+  eq(r.length, 2, `got ${JSON.stringify(r)}`);
+  ok(/a: number/.test(r[0]) && /b: string/.test(r[0]), 'the whole inline type is kept, not cut at its `;`');
+});
+
+test('ts — a real method body is STILL a body', () => {
+  const r = rowsOfFirst('class F { m(): void { const x = { a: 1 }; } n(): void {} }');
+  eq(r.length, 2, `a body with an object literal in it is not a member — got ${JSON.stringify(r)}`);
+});
+
+test('cs — the same rule holds for C# generics and initialisers', () => {
+  const r = rowsOfFirst('public class G { private List<int> xs = new List<int> { 1, 2 }; public void M() { } }', 'cs');
+  eq(r.length, 2, `a collection initialiser is not a body — got ${JSON.stringify(r)}`);
+});
 
 /* ───────────────────────── */
 

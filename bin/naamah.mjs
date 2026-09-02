@@ -15,6 +15,9 @@ import { fileURLToPath } from 'node:url';
 import { weave, graphsOf, WeaveError } from '../src/weave.mjs';
 import { author, sync, loadGraph, BindError } from '../src/bind.mjs';
 import { toText } from '../src/totext.mjs';
+import { buildToPage, summariseCheck, BuildError } from '../src/build.mjs';
+import { serve, DaemonError } from '../src/daemon.mjs';
+import { addReply, load as loadComments, pending, resolve as resolveThread, threadToText, CommentError } from '../src/comments.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const version = () => {
@@ -32,6 +35,54 @@ const HELP = `naamah ${version()} — a diagram is a web
 
         A .puml holding several @startuml blocks yields one page per diagram, each
         named after its own block; [out.html] applies only when there is just one.
+
+  naamah build <dir> [out.html]
+        Build a page from a DIRECTORY of design files — ordinary TypeScript, one
+        annotated class per type. This is the door to use when authoring an
+        architecture: drop a file in and the diagram grows, with nothing to
+        register and no API to keep valid.
+
+          import { Domain, Owns, Uses, UsedBy } from './naamah';
+
+          @Domain('Rewards')
+          @Owns(RewardEntry)        // a class: pass the value
+          @Uses<IConfig>()          // an interface: pass the TYPE
+          export class RewardService {
+              private ledger: Ledger;   // a bare field implies an edge too
+          }
+
+          @UsedBy(RewardService)    // the SAME edge, from the far end
+          export class Ledger {}
+
+        A relation may be declared at EITHER end and is drawn once. The design is
+        typechecked with tsc first, so a relation naming a type that does not
+        exist is a compile error rather than a silently missing arrow. The
+        vocabulary file naamah.ts is written beside the design if absent.
+
+        --no-verify   draw it without typechecking
+
+  naamah show <dir> [--port N]
+        Serve the design as a LIVE page on the local network, and keep it in step:
+        saving a design file rebuilds the graph and the open page reflows.
+
+        The page carries a comment layer. Click a type card (or a member row) and
+        write; the comment is appended to <dir>/naamah.comments.json. The daemon
+        watches that file and fires its hook whenever a thread is left waiting on
+        an answer, so an agent is woken by the file rather than by a message it
+        had to be listening for. The agent replies into the same file, and every
+        open page re-reads it. Nothing that matters is held in memory: kill the
+        daemon mid-sentence and the thread is still on disk, still unanswered.
+
+        Bound to 0.0.0.0 so a phone on the LAN can open it. Ctrl-C to stop.
+
+  naamah reply <threadId> <commenter> <text...>
+        Reply into a thread from the shell — the same door the page and the agent
+        use. Marked as an agent reply, which is what stops the hook re-firing for
+        that thread.
+
+  naamah comments <dir> [--pending]
+        Print the conversation as text. --pending lists only threads still waiting
+        on an answer, which is what a hook hands an agent.
 
   naamah author <script.mjs> [out.html]
         Build a page from a script instead of from PlantUML. The script's default
@@ -73,7 +124,7 @@ const [, , cmd, ...rest] = process.argv;
 
 // Switches that never take a value. Without this list, `--no-comments page.html` would swallow the
 // filename as the switch's argument and then report that no file was given.
-const BOOLS = new Set(['no-comments']);
+const BOOLS = new Set(['no-comments', 'no-verify']);
 
 /** `--path X` / `--path=X`, or the first bare argument. */
 function parseArgs(argv) {
@@ -96,7 +147,8 @@ function parseArgs(argv) {
 }
 
 const die = (msg, code = 1) => { console.error(`naamah: ${msg}`); process.exit(code); };
-const codeOf = (err) => (err instanceof WeaveError || err instanceof BindError ? err.code : 2);
+const codeOf = (err) => (err instanceof WeaveError || err instanceof BindError ? err.code
+  : err instanceof BuildError || err instanceof DaemonError || err instanceof CommentError ? 1 : 2);
 
 try {
   switch (cmd) {
@@ -113,6 +165,70 @@ try {
       if (skipped.length) {
         console.error(`naamah: skipped ${skipped.length} non-class diagram(s): ${skipped.join(', ')}`);
       }
+      break;
+    }
+
+    case 'build': {
+      const { flags, bare } = parseArgs(rest);
+      const [dir, output] = bare;
+      if (!dir) die('build needs a directory — naamah build <dir> [out.html]');
+      const r = buildToPage(dir, output, { verify: !flags.has('no-verify') });
+      if (r.prelude.written) console.error(`naamah: wrote the vocabulary to ${r.prelude.path}`);
+      console.error(
+        `naamah: ${r.graph.nodes.length} types · ${r.graph.edges.length} relations · ` +
+        `${r.graph.notes.length} notes · ${r.graph.clusters.length} domains ` +
+        `· ${r.files.length} file(s) → ${r.out}`
+      );
+      console.error(`naamah: ${summariseCheck(r.check, r.root)}`);
+      // A design that does not typecheck has DRAWN, because seeing the half-built diagram is how an
+      // author finds the fix — but it must not exit 0 and be mistaken for a good build by a script.
+      if (r.check.ran && !r.check.ok) process.exit(2);
+      break;
+    }
+
+    case 'show': {
+      const { named, bare } = parseArgs(rest);
+      const [dir] = bare;
+      if (!dir) die('show needs a directory — naamah show <dir> [--port N]');
+      const port = named.port ? Number(named.port) : undefined;
+      if (named.port && !Number.isInteger(port)) die(`--port must be a number, got "${named.port}"`);
+      const d = await serve(dir, {
+        port,
+        // The CLI's hook is to SAY so. ayin passes its own, which hands the threads to the agent.
+        onHook: (threads) => {
+          for (const t of threads) process.stderr.write(`${threadToText(t)}\n`);
+        },
+      });
+      // Park. The daemon is the process; there is nothing left to return to.
+      const bye = async () => { await d.stop(); process.exit(0); };
+      process.on('SIGINT', bye);
+      process.on('SIGTERM', bye);
+      await new Promise(() => {});
+      break;
+    }
+
+    case 'reply': {
+      const [threadId, commenter, ...words] = rest;
+      if (!threadId || !words.length) {
+        die('reply needs a thread, a commenter and text — naamah reply <threadId> <commenter> <text...>');
+      }
+      // The design directory is the cwd by default: a reply is about a design you are standing in.
+      const { named, bare } = parseArgs([]);
+      const dir = process.env.NAAMAH_DIR || process.cwd();
+      const t = addReply(dir, threadId, { by: commenter, text: words.join(' '), agent: true });
+      console.error(`naamah: replied to ${t.id} (${t.messages.length} message(s)) in ${dir}`);
+      break;
+    }
+
+    case 'comments': {
+      const { flags, bare } = parseArgs(rest);
+      const dir = bare[0] || process.cwd();
+      const threads = flags.has('pending') ? pending(dir) : loadComments(dir).threads;
+      if (!threads.length) {
+        console.error(flags.has('pending') ? 'naamah: nothing awaiting an answer' : 'naamah: no comments yet');
+        break;
+      }
+      for (const t of threads) process.stdout.write(`${threadToText(t)}\n\n`);
       break;
     }
 
