@@ -48,6 +48,8 @@ const Naamah = (() => {
     unfold: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6l3-3 3 3"/><path d="M5 10l3 3 3-3"/></svg>',
     fold: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3.5l3 3 3-3"/><path d="M5 12.5l3-3 3 3"/></svg>',
     trash: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 4.5h11"/><path d="M6 4.5V3h4v1.5"/><path d="M4 4.5l.8 9h6.4l.8-9"/></svg>',
+    eye: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1.4 8S3.9 3.5 8 3.5 14.6 8 14.6 8 12.1 12.5 8 12.5 1.4 8 1.4 8z"/><circle cx="8" cy="8" r="2"/></svg>',
+    eyeoff: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1.4 8S3.9 3.5 8 3.5c1 0 1.9.3 2.7.7M14.6 8s-1 1.8-2.8 3.1M5.6 11.8c.7.4 1.5.7 2.4.7 4.1 0 6.6-4.5 6.6-4.5"/><path d="M2.5 2.5l11 11"/></svg>',
     reset: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 8a5.5 5.5 0 1 0 1.8-4.1"/><path d="M2.2 2.4v3.2h3.2"/></svg>',
   };
 
@@ -228,6 +230,8 @@ const Naamah = (() => {
       query: '',
       kinds: new Set(['interface', 'class', 'abstract', 'enum', 'struct']),
       collapsed: new Set(),
+      // Domains drawn as empty boxes: the box and every wire into it stay, the text goes.
+      muted: new Set(),
       // Deletion is SOFT. A removed card stays in the graph, flagged, so Reset can bring it
       // back — a destructive delete would make "reset" a promise the runtime cannot keep.
       deleted: new Set(),
@@ -525,6 +529,7 @@ const Naamah = (() => {
 
     function refreshFocusButtons() {
       for (const [id, g] of groups) g._focusBtn?.classList.toggle('on', state.focusGroup === id);
+      for (const [cid, row] of domRows) row.classList.toggle('on', state.focusGroup === cid);
       $('#topbar')?.classList.toggle('focused', !!state.focusGroup);
     }
 
@@ -619,7 +624,13 @@ const Naamah = (() => {
         const hiddenByKind = n.kind === 'note' ? !state.showNotes : !state.kinds.has(n.kind);
         const outOfFocus = focusMembers ? !focusMembers.has(id) : false;
         const gone = state.deleted.has(id);
-        card.style.display = gone || hiddenByGroup || hiddenByKind || outOfFocus ? 'none' : '';
+        const off = gone || hiddenByGroup || hiddenByKind || outOfFocus;
+        card.style.display = off ? 'none' : '';
+        // An emptied card is still a card: it holds its place in the layout and its wires still
+        // land on it. The name moves to the tooltip, and the inspector still reads it in full.
+        const ghost = !off && isMuted(id);
+        card.classList.toggle('ghost', ghost);
+        if (ghost) card.title = n.qname || n.name; else card.removeAttribute('title');
       }
       for (const [id, g] of groups) {
         const collapsed = state.collapsed.has(id);
@@ -627,6 +638,7 @@ const Naamah = (() => {
         const outOfFocus = state.focusGroup && !inFocusGroup(id);
         g.style.display = isHiddenGroup(id) || outOfFocus ? 'none' : '';
       }
+      $('#btn-notes')?.classList.toggle('off', !state.showNotes);
     }
     function isHiddenGroup(id) {
       let cur = C.get(id).parent ? C.get(C.get(id).parent) : null;
@@ -1363,6 +1375,93 @@ const Naamah = (() => {
 
     /* ── chrome ──────────────────────────────────────────────── */
 
+    /* ── domains ────────────────────────────────────────────── */
+
+    // Emptying a domain is NOT hiding it. Hiding takes the relations with it, and the wires into a
+    // domain are the reason it is still on screen at all — so the box stays, at a fixed small size,
+    // and only the text inside it goes. The diagram keeps its shape and loses its noise.
+    const NO_DOMAIN = '';
+    const mutedCluster = (cid) => {
+      if (!cid || !C.has(cid)) return state.muted.has(NO_DOMAIN);
+      let cur = C.get(cid);
+      while (cur) { if (state.muted.has(cur.id)) return true; cur = cur.parent ? C.get(cur.parent) : null; }
+      return false;
+    };
+    const isMuted = (id) => mutedCluster(N.get(id).cluster);
+
+    const domRows = new Map();    // cluster id (or NO_DOMAIN) -> its row
+    const domItems = new Map();   // node id -> its row
+
+    function toggleMuted(cid) {
+      if (state.muted.has(cid)) state.muted.delete(cid); else state.muted.add(cid);
+      const label = cid === NO_DOMAIN ? '(no domain)' : C.get(cid).label;
+      applyVisibility();
+      refreshDomainPanel();
+      schedule(true);
+      relayoutWhenSettled({ full: true });
+      toastMsg(`${label} — ${state.muted.has(cid) ? 'emptied' : 'drawn'}`);
+    }
+
+    function buildDomainPanel() {
+      const panel = el('div', 'hud'); panel.id = 'domains';
+      const list = el('div', 'panel-list');
+      const loose = [...N.values()].filter((n) => n.kind !== 'note' && (!n.cluster || !C.has(n.cluster)));
+
+      const domainRow = (cid, label, kids, depth) => {
+        const row = el('div', 'dom-row');
+        row.style.setProperty('--d', String(depth));
+        const eye = el('button', 'dom-eye', ICON.eye);
+        eye.title = `Empty every box in ${label} — the boxes and their wires stay`;
+        eye.onclick = (ev) => { ev.stopPropagation(); toggleMuted(cid); };
+        const name = el('div', 'dom-name', esc(label));
+        row.append(eye, name, el('div', 'dom-count', String(kids)));
+        if (cid !== NO_DOMAIN) row.onclick = () => toggleGroupFocus(cid);
+        domRows.set(cid, row);
+        list.append(row);
+      };
+      const typeRow = (n, depth) => {
+        const row = el('div', 'dom-item',
+          `<span class="dom-badge">${KIND_LETTER[n.kind] || 'C'}</span><span>${esc(n.name)}</span>`);
+        row.style.setProperty('--d', String(depth));
+        row.dataset.kind = n.kind;
+        row.onclick = () => flyTo(n.id);
+        domItems.set(n.id, row);
+        list.append(row);
+      };
+      const walk = (c, depth) => {
+        domainRow(c.id, c.label, countKids(c.id), depth);
+        for (const id of c.kids) { const n = N.get(id); if (n && n.kind !== 'note') typeRow(n, depth + 1); }
+        for (const s of c.subs) walk(C.get(s), depth + 1);
+      };
+      for (const c of C.values()) if (!c.parent || !C.has(c.parent)) walk(c, 0);
+      if (loose.length) {
+        domainRow(NO_DOMAIN, '(no domain)', loose.length, 0);
+        for (const n of loose) typeRow(n, 1);
+      }
+
+      panel.append(
+        el('div', 'panel-head', `${ICON.layers}<span>Domains</span><span class="panel-count">${domRows.size}</span>`),
+        list);
+      if (graph.notes.length) {
+        const foot = el('div', 'panel-foot');
+        const btn = el('button', 'dom-toggle', `${ICON.note}<span>Notes</span>`);
+        btn.id = 'btn-notes';
+        btn.title = 'Show or hide every note (N)';
+        foot.append(btn);
+        panel.append(foot);
+      }
+      return panel;
+    }
+
+    function refreshDomainPanel() {
+      for (const [cid, row] of domRows) {
+        const off = mutedCluster(cid);
+        row.classList.toggle('off', off);
+        row.querySelector('.dom-eye').innerHTML = off ? ICON.eyeoff : ICON.eye;
+      }
+      for (const [id, row] of domItems) row.classList.toggle('off', isMuted(id));
+    }
+
     function buildChrome() {
       const bar = el('div', 'hud'); bar.id = 'topbar';
       bar.innerHTML = `
@@ -1438,7 +1537,7 @@ const Naamah = (() => {
           <dt><kbd>T</kbd> <kbd>S</kbd></dt><dd>Light/dark · compact vs original spacing</dd>
         </dl></div>`;
 
-      document.body.append(bar, zoom, legend, map, insp, toast, help);
+      document.body.append(bar, zoom, legend, map, insp, toast, help, buildDomainPanel());
 
       // Every action is a named function so the key and the button (where one still
       // exists) drive the same code path — the bar can lose a button without losing a
@@ -1461,6 +1560,7 @@ const Naamah = (() => {
           computeFocusMembers();
           state.collapsed.clear();
           state.deleted.clear();
+          state.muted.clear();
           state.selected = null;
           state.showNotes = true;
           state.compact = INITIAL_COMPACT;
@@ -1482,6 +1582,7 @@ const Naamah = (() => {
           closeInspector();
           applyVisibility();
           refreshFocusButtons();
+          refreshDomainPanel();
           setLevel(INITIAL_LEVEL);          // also refreshes the group + bar buttons
           layoutNow(true);
           cam.fitTo(contentBox());
@@ -1520,6 +1621,8 @@ const Naamah = (() => {
       $('#btn-out').onclick = () => cam.zoomAt(stage.clientWidth / 2, stage.clientHeight / 2, 1 / 1.35, true);
       $('#zoomval').onclick = act.fit;
       $('#btn-help').onclick = act.help;
+      const notesBtn = $('#btn-notes');
+      if (notesBtn) notesBtn.onclick = act.notes;
       help.onclick = (e) => { if (e.target === help) help.classList.remove('open'); };
 
       legend.querySelectorAll('[data-kind]').forEach((it) => {

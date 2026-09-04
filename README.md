@@ -230,6 +230,9 @@ DOMAIN Rewards › runtime
 | `⌄⌃` on a domain tab | open every card in that domain, or fold them all back |
 | `◎` on a domain tab | **focus** it — see below |
 | domain tab | collapse the domain to a puck; crossing wires re-anchor to it |
+| a name in the domain list | a domain focuses it · a type flies to it |
+| the eye in the domain list | draw that domain as **empty boxes** — the boxes and their wires stay |
+| `Notes` under the domain list | hide every note (`N` does the same) |
 | `Expand all` / `E` | everything open ↔ everything folded |
 | `/` | search names, members **and** explanations |
 | `1` `2` `3` | detail: titles · members · full prose |

@@ -169,6 +169,14 @@ html, body {
 .card.linked { border-color: color-mix(in oklab, var(--wire-hot) 60%, var(--line)); }
 .card.linked2 { border-color: color-mix(in oklab, var(--wire-hot) 26%, var(--line)); }
 .card.dimmed { opacity: .14; }
+/* A domain emptied from the panel. The box holds its place and its wires still land on it;
+   the name is on the tooltip and in the inspector, so nothing is lost — only drawn. */
+.card.ghost {
+  width: 108px; min-width: 0; height: 32px;
+  background: var(--surface-2); border-style: dashed; opacity: .5;
+}
+.card.ghost > * { display: none; }
+.card.ghost:hover { opacity: .9; }
 .card.hit { border-color: var(--k-enum); box-shadow: 0 0 0 1px var(--k-enum); }
 
 .card[data-kind="interface"] { --accent: var(--k-interface); }
@@ -545,6 +553,64 @@ html, body {
 .legend-sep { height: 1px; background: var(--line); }
 .legend-item .rel-sample { width: 34px; height: 12px; overflow: visible; flex: none; }
 
+/* domains */
+#domains {
+  left: 16px; top: 66px; width: 244px;
+  max-height: calc(100vh - 240px);
+  background: var(--surface);
+  border: 1px solid var(--line); border-radius: 12px;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.panel-head {
+  display: flex; align-items: center; gap: 7px; flex: none;
+  padding: 10px 12px; border-bottom: 1px solid var(--line-soft);
+  font: 650 10px/1 var(--ui); text-transform: uppercase; letter-spacing: .07em; color: var(--ink-3);
+}
+.panel-head svg { width: 13px; height: 13px; }
+.panel-count { margin-left: auto; font-variant-numeric: tabular-nums; }
+.panel-list { overflow: auto; padding: 6px; }
+.dom-row, .dom-item {
+  display: flex; align-items: center; gap: 7px;
+  padding: 4px 6px; border-radius: 7px; cursor: pointer;
+  margin-left: calc(var(--d, 0) * 11px);
+  transition: background .12s, opacity .15s;
+}
+.dom-row:hover, .dom-item:hover { background: var(--surface-2); }
+.dom-row { font: 600 11.5px/1.4 var(--ui); color: var(--ink); }
+.dom-row.on { background: color-mix(in oklab, var(--wire-hot) 16%, transparent); color: var(--wire-hot); }
+.dom-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dom-count { font: 500 10px/1 var(--ui); color: var(--ink-3); font-variant-numeric: tabular-nums; flex: none; }
+.dom-eye {
+  width: 20px; height: 20px; flex: none; border: 0; border-radius: 5px; padding: 0;
+  background: transparent; color: var(--ink-3);
+  display: grid; place-items: center; cursor: pointer;
+}
+.dom-eye:hover { background: var(--surface-3); color: var(--ink); }
+.dom-eye svg { width: 13px; height: 13px; }
+.dom-item { font: 400 11px/1.4 var(--mono); color: var(--ink-2); }
+.dom-item > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dom-badge {
+  width: 15px; height: 15px; flex: none; border-radius: 4px;
+  background: color-mix(in oklab, var(--accent) 20%, transparent); color: var(--accent);
+  font: 700 8.5px/15px var(--ui); text-align: center;
+}
+.dom-item[data-kind="interface"] { --accent: var(--k-interface); }
+.dom-item[data-kind="class"]     { --accent: var(--k-class); }
+.dom-item[data-kind="abstract"]  { --accent: var(--k-abstract); }
+.dom-item[data-kind="enum"]      { --accent: var(--k-enum); }
+.dom-item[data-kind="struct"]    { --accent: var(--k-struct); }
+.dom-row.off .dom-name, .dom-row.off .dom-count, .dom-item.off { opacity: .35; }
+.panel-foot { flex: none; border-top: 1px solid var(--line-soft); padding: 6px; }
+.dom-toggle {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 6px 7px; border: 0; border-radius: 7px; background: transparent;
+  color: var(--ink-2); font: 550 11.5px/1 var(--ui); cursor: pointer;
+  transition: background .12s, color .12s, opacity .15s;
+}
+.dom-toggle:hover { background: var(--surface-2); color: var(--ink); }
+.dom-toggle svg { width: 13px; height: 13px; flex: none; }
+.dom-toggle.off { opacity: .4; }
+
 /* minimap */
 #minimap {
   right: 16px; top: 66px;
@@ -615,7 +681,7 @@ html, body {
 }
 
 @media (max-width: 900px) {
-  #minimap, #legend { display: none; }
+  #minimap, #legend, #domains { display: none; }
   .hud-field input { width: 110px; }
   .brand-title { max-width: 30vw; }
 }
